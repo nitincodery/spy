@@ -1,0 +1,235 @@
+#+title: spy.clj - A Literate Programming Guide
+
+This document is a literate programming guide to the =spy.clj= library. The code is embedded in the Org mode file and can be "tangled" to produce the =spy.clj= source file.
+
+* Namespace and Dependencies
+
+We begin by defining the namespace =spy= and requiring the =clojure.walk= library, which provides functions for traversing and transforming Clojure data structures. We will use =walk/postwalk= to recursively transform the code we want to spy on.
+
+#+BEGIN_SRC clojure :tangle src/spy.clj
+(ns spy
+  (:require [clojure.walk :as walk]))
+#+END_SRC
+
+* The Spy Datastore
+
+=*spy-bindings*= is a dynamic var that holds an atom of a map. This map is the central datastore for all the local bindings we are spying on. The keys of the map are the symbols of the bindings, and the values are their current values.
+
+We use a dynamic var so that it can be rebound, and an atom to allow for safe concurrent updates.
+
+#+BEGIN_SRC clojure :tangle src/spy.clj
+(def ^:dynamic *spy-bindings* (atom {}))
+#+END_SRC
+
+* Helper Functions
+
+These are helper functions used to identify and extract the symbols we want to spy on.
+
+**=should-spy?=**
+
+This function is a predicate that determines if a given symbol should be spied upon. We want to spy on regular symbols, but not on special symbols like =&= (used in function argument lists) or compiler-generated symbols like =map__1234=.
+
+#+BEGIN_SRC clojure :tangle src/spy.clj
+(defn should-spy?
+  "Predicate to determine if a symbol should be spied upon."
+  [sym]
+  (and (symbol? sym)
+       (not= '& sym)
+       (not (re-matches #"map__\d+|&" (str sym)))))
+#+END_SRC
+
+**=bound-symbols=**
+
+This function takes a binding form (like a function's argument vector) and returns a sequence of all the symbols that are bound within it. It uses =clojure.walk/postwalk= to traverse the binding form and collect all the symbols that satisfy =should-spy?=.
+
+#+BEGIN_SRC clojure :tangle src/spy.clj
+(defn- bound-symbols
+  "Return a sequence of all valid symbol nodes inside a binding form (e.g., arg vector)."
+  [binding]
+  (let [acc (atom [])]
+    (walk/postwalk
+     (fn [x]
+       (when (should-spy? x)
+         (swap! acc conj x))
+       x)
+     binding)
+    (distinct @acc)))
+#+END_SRC
+
+**=extract-binding-symbols=**
+
+This function is specifically for =let= binding vectors. It takes a =let= binding vector (e.g., =[a 1 b 2]=) and returns a collection of the symbols that are bound in it (='a= and ='b=).
+
+This version is refactored to use a transducer. We compose the =mapcat= and =distinct= operations into a single transducer =xform=. We then use =sequence= to apply this transducer to the partitioned binding vector. This approach is more idiomatic and can be more performant as it avoids the creation of intermediate lazy sequences.
+
+#+BEGIN_SRC clojure :tangle src/spy.clj
+(defn- extract-binding-symbols
+  "Given a let binding vector, return the collection of symbols bound by it."
+  [bvec]
+  (let [xform (comp (mapcat (fn [[binding _expr]] (bound-symbols binding)))
+                    (distinct))]
+    (sequence xform (partition 2 bvec))))
+#+END_SRC
+
+* Code Injection
+
+This is the core of the library. The =inject-spy-defs= function walks a given form and injects the code that will record the values of the bindings. It uses =clojure.walk/postwalk=, which means it transforms the inner forms before the outer forms.
+
+For example, if you have a =let= inside a =defn=, the =let= will be transformed first, and then the =defn=.
+
+#+BEGIN_SRC clojure :tangle src/spy.clj
+(defn inject-spy-defs
+  "Walk the form and inject swap! calls into let bindings and function arguments."
+  [form]
+  (walk/postwalk
+   (fn [f]
+     (cond
+#+END_SRC
+
+**Instrumenting =defn=, =fn=, and =fn*=**
+
+We first check if the form is a function definition (=defn=, =fn=, or =fn*=). If it is, we extract the argument vector and the body of the function. We then generate a =swap!= call for each symbol in the argument vector to store its value in =*spy-bindings*=. Finally, we reconstruct the function with the injected =swap!= calls.
+
+We handle both single-arity and multi-arity functions correctly.
+
+Here is an example of the transformation:
+
+*Before:*
+#+BEGIN_SRC clojure
+(defn my-fn [a]
+  (let [b (* a 2)]
+    (+ a b)))
+#+END_SRC
+
+*After:*
+#+BEGIN_SRC clojure
+(defn my-fn [a]
+  (let [a a]
+    (swap! *spy-bindings* assoc 'a a)
+    (let [b (* a 2)
+          b b]
+      (swap! *spy-bindings* assoc 'b b)
+      (+ a b))))
+#+END_SRC
+
+#+BEGIN_SRC clojure :tangle src/spy.clj
+       ;; instrument defn / fn / fn*
+       ;; Matches any function definition form.
+       (and (seq? f)
+            (#{'fn 'fn* 'defn 'defn-} (first f)))
+       (let [;; A defn form might have a name, but a fn form does not.
+             name? (when (symbol? (second f)) (second f))
+             ;; A function can have multiple arities (bodies). This logic handles both single- and multi-arity functions.
+             bodies (if (vector? (if name? (nth f 2) (second f)))
+                      [(drop (if name? 2 1) f)]
+                      (if name? (drop 2 f) (rest f)))
+             ;; We process each arity (body) separately.
+             new-bodies
+             (map (fn [body]
+                    (let [args (first body)
+                          body-forms (rest body)
+                          ;; Get all the symbols from the argument vector, including those in destructuring.
+                          syms (bound-symbols args)
+                          ;; For each symbol, create a form that will update our spy atom.
+                          spy-forms (map (fn [s] =(swap! *spy-bindings* assoc '~s ~s)) syms)]
+                      ;; We reconstruct the function body. We wrap the original body in a =let= block.
+                      ;; This is crucial because it ensures that any destructuring in the argument vector
+                      ;; has already happened before we try to access the symbols to spy on them.
+                      =(~args
+                        (let [~@(mapcat (fn [s] [s s]) syms)]
+                          ~@spy-forms
+                          (do ~@body-forms)))))
+                  bodies)]
+         ;; Reconstruct the final function form with the new, instrumented bodies.
+         (if name?
+           =(~(first f) ~name? ~@new-bodies)
+           =(~(first f) ~@new-bodies)))
+#+END_SRC
+
+**Instrumenting =let= and =let*=**
+
+Next, we check if the form is a =let= or =let*= binding. If it is, we extract the binding vector and the body. We then use =extract-binding-symbols= to get the symbols bound in the =let=, and generate =swap!= calls to store their values. We reconstruct the =let= form with the injected =swap!= calls.
+
+#+BEGIN_SRC clojure :tangle src/spy.clj
+       ;; instrument let / let*
+       ;; Matches let and let* forms.
+       (and (seq? f) (#{'let 'let*} (first f)))
+       (let [bvec (second f)
+             body (drop 2 f)
+             ;; Get all the symbols from the binding vector.
+             syms (extract-binding-symbols bvec)
+             ;; For each symbol, create a form that will update our spy atom.
+             spy-forms (map (fn [sym]
+                              =(swap! *spy-bindings* assoc '~sym ~sym))
+                            syms)]
+         ;; We use let* to ensure that bindings are available sequentially, which is important for correctness.
+         ;; The spy forms are inserted after the binding vector, so they have access to the bound values.
+         =(let* ~bvec
+                ~@spy-forms
+                ~@body))
+
+       :else f))
+   form))
+#+END_SRC
+
+* Public API
+
+These are the functions and macros that users of the library will interact with.
+
+**=spy= Macro**
+
+The =spy= macro is the main entry point for the library. It takes a body of code, macroexpands it fully, and then uses =inject-spy-defs= to inject the spying code.
+
+#+BEGIN_SRC clojure :tangle src/spy.clj
+(defmacro spy [& body]
+  (let [expanded (walk/macroexpand-all =(do ~@body))]
+    (inject-spy-defs expanded)))
+#+END_SRC
+
+**=unspy=**
+
+This function resets the =*spy-bindings*= atom to an empty map, effectively clearing all spied values.
+
+#+BEGIN_SRC clojure :tangle src/spy.clj
+(defn unspy
+  "Resets all spy bindings."
+  []
+  (reset! *spy-bindings* {}))
+#+END_SRC
+
+**=spy-val=**
+
+This function retrieves the value of a spied symbol from the =*spy-bindings*= atom.
+
+#+BEGIN_SRC clojure :tangle src/spy.clj
+(defn spy-val
+  "Retrieves the value of a spied symbol."
+  [sym]
+  (get @*spy-bindings* sym))
+#+END_SRC
+
+**=spy-runtime=**
+
+This function allows for dynamic instrumentation of a function at runtime. It takes a symbol representing the var to be redefined and a form (as a string or a list) to be instrumented. It resolves the namespace of the target symbol, injects the spying code, and then evaluates the instrumented code in the context of the target namespace. This is what the Emacs integration uses to provide on-the-fly instrumentation. This is what allows you to instrument a function without manually wrapping it in a =(spy/spy ...)= form.
+
+This is the function that powers the Emacs command =clojure-spy-defn-at-point= (=C-c q=).
+
+#+BEGIN_SRC clojure :tangle src/spy.clj
+(defn spy-runtime
+  "Dynamically instruments and redefines a var from a string or list.
+  Crucially, it redefines the var in its original namespace."
+  [var-symbol form-or-str]
+  (let [form (if (string? form-or-str)
+               (read-string form-or-str)
+               form-or-str)
+        ;; Resolve the namespace from the target symbol
+        target-ns (find-ns (symbol (namespace var-symbol)))
+        _ (when-not target-ns
+            (throw (IllegalArgumentException.
+                    (str "Namespace not found for symbol: " var-symbol))))
+        expanded (walk/macroexpand-all form)
+        injected (inject-spy-defs expanded)]
+    ;; Bind *ns* to the target namespace before calling eval.
+    (binding [*ns* target-ns]
+      (eval injected))))
+#+END_SRC

@@ -137,13 +137,23 @@
           (cider-nrepl-sync-request:eval expr)
           (message "Unspy at point successful"))))))
 
-;; --- Keybindings and Loader ---
+;; --- Minor Mode Definition ---
 
-(define-key clojure-mode-map (kbd "C-c q") #'clojure-spy-defn-at-point)
-(define-key clojure-mode-map (kbd "C-c y") #'clojure-spy-unspy)
-(define-key clojure-mode-map (kbd "C-c w") #'clojure-spy-wrap-defn)
-(define-key clojure-mode-map (kbd "C-c W") #'clojure-spy-unwrap-defn)
-(define-key clojure-mode-map (kbd "C-c o") #'clojure-spy-overlay-show)
-(define-key clojure-mode-map (kbd "C-c O") #'clojure-spy-overlay-hide)
+(defvar spy-clojure-mode-map
+  (let ((map (make-keymap)))
+    (define-key map (kbd "C-c q") #'clojure-spy-defn-at-point)
+    (define-key map (kbd "C-c y") #'clojure-spy-unspy)
+    (define-key map (kbd "C-c w") #'clojure-spy-wrap-defn)
+    (define-key map (kbd "C-c W") #'clojure-spy-unwrap-defn)
+    (define-key map (kbd "C-c o") #'clojure-spy-overlay-show)
+    (define-key map (kbd "C-c O") #'clojure-spy-overlay-hide)
+    map)
+  "Keymap for spy-clojure-mode.")
 
+(define-minor-mode spy-clojure-mode
+  "A minor mode for spying on Clojure code."
+  :init-value nil
+  :lighter " Spy"
+  :keymap spy-clojure-mode-map)
 
+(add-hook 'clojure-mode-hook #'spy-clojure-mode)

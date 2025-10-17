@@ -25,9 +25,9 @@
 (defn- extract-binding-symbols
   "Given a let binding vector, return the collection of symbols bound by it."
   [bvec]
-  (->> (partition 2 bvec)
-       (mapcat (fn [[binding _expr]] (bound-symbols binding)))
-       (distinct)))
+  (let [xform (comp (mapcat (fn [[binding _expr]] (bound-symbols binding)))
+                    (distinct))]
+    (sequence xform (partition 2 bvec))))
 
 (defn inject-spy-defs
   "Walk the form and inject swap! calls into let bindings and function arguments."
@@ -36,41 +36,50 @@
    (fn [f]
      (cond
        ;; instrument defn / fn / fn*
+       ;; Matches any function definition form.
        (and (seq? f)
             (#{'fn 'fn* 'defn 'defn-} (first f)))
-       (let [name? (when (symbol? (second f)) (second f))
-             ;; Handle multi-arity functions correctly
+       (let [;; A defn form might have a name, but a fn form does not.
+             name? (when (symbol? (second f)) (second f))
+             ;; A function can have multiple arities (bodies). This logic handles both single- and multi-arity functions.
              bodies (if (vector? (if name? (nth f 2) (second f)))
                       [(drop (if name? 2 1) f)]
                       (if name? (drop 2 f) (rest f)))
+             ;; We process each arity (body) separately.
              new-bodies
              (map (fn [body]
                     (let [args (first body)
                           body-forms (rest body)
+                          ;; Get all the symbols from the argument vector, including those in destructuring.
                           syms (bound-symbols args)
+                          ;; For each symbol, create a form that will update our spy atom.
                           spy-forms (map (fn [s] `(swap! *spy-bindings* assoc '~s ~s)) syms)]
-                      ;; Wrap the original body in a `let`.
-                      ;; This ensures that destructuring in `args` has already happened
-                      ;; before we try to access the symbols to spy on them.
+                      ;; We reconstruct the function body. We wrap the original body in a `let` block.
+                      ;; This is crucial because it ensures that any destructuring in the argument vector
+                      ;; has already happened before we try to access the symbols to spy on them.
                       `(~args
                         (let [~@(mapcat (fn [s] [s s]) syms)]
                           ~@spy-forms
                           (do ~@body-forms)))))
                   bodies)]
+         ;; Reconstruct the final function form with the new, instrumented bodies.
          (if name?
            `(~(first f) ~name? ~@new-bodies)
            `(~(first f) ~@new-bodies)))
 
        ;; instrument let / let*
+       ;; Matches let and let* forms.
        (and (seq? f) (#{'let 'let*} (first f)))
        (let [bvec (second f)
              body (drop 2 f)
+             ;; Get all the symbols from the binding vector.
              syms (extract-binding-symbols bvec)
+             ;; For each symbol, create a form that will update our spy atom.
              spy-forms (map (fn [sym]
                               `(swap! *spy-bindings* assoc '~sym ~sym))
                             syms)]
-         ;; Using let* ensures bindings are available sequentially.
-         ;; Placing spy-forms after the binding vector is correct.
+         ;; We use let* to ensure that bindings are available sequentially, which is important for correctness.
+         ;; The spy forms are inserted after the binding vector, so they have access to the bound values.
          `(let* ~bvec
                 ~@spy-forms
                 ~@body))

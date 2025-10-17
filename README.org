@@ -1,0 +1,216 @@
+* Spy - A Clojure Debugging Tool
+
+Spy is a debugging tool for Clojure that allows you to "spy" on the values of local bindings within your functions and =let= blocks. It comes with an Emacs Lisp companion that provides a seamless debugging experience within Emacs.
+
+*Features:*
+
+- *Effortless Spying:* Use the =spy= macro to automatically track the values of local bindings.
+- *Dynamic Instrumentation:* Instrument and un-instrument functions on the fly without restarting your REPL.
+- *Emacs Integration:* A rich Emacs experience with overlays to display spied values directly in your source code.
+- *Minimal Setup:* Works with both =deps.edn= and Leiningen.
+
+* Installation
+
+**deps.edn**
+
+*** From GitHub
+
+Add the following to your `deps.edn` file to include `spy` as a Git dependency.
+
+#+BEGIN_SRC clojure
+{:deps {io.github.your-username/spy {:git/sha "..."}}}
+#+END_SRC
+
+Replace `your-username` with your GitHub username and `...` with the specific commit SHA you want to use.
+
+*** Local Development
+
+For local development, you can use a `:local/root` dependency. This is useful when you are working on `spy` and a project that uses it at the same time.
+
+#+BEGIN_SRC clojure
+{:deps {spy {:local/root "/path/to/spy"}}}
+#+END_SRC
+
+Replace `/path/to/spy` with the actual path to your local `spy` project.
+
+**Leiningen**
+
+*** From JitPack
+
+For Leiningen-based projects, you can use JitPack to include this library.
+
+1. Add JitPack to your repositories in `project.clj`:
+
+#+BEGIN_SRC clojure
+:repositories [["jitpack" "https://jitpack.io"]]
+#+END_SRC
+
+2. Add the dependency to your `project.clj`:
+
+#+BEGIN_SRC clojure
+:dependencies [[org.clojure/clojure "1.10.1"]
+               [com.github.your-username/spy "the-commit-sha"]]
+#+END_SRC
+
+Replace `your-username` and `the-commit-sha` with the appropriate values.
+
+*** Local Development (Checkouts)
+
+For local development with Leiningen, the `lein checkouts` feature is the standard way to work with a library and a project that uses it simultaneously. It allows Leiningen to use the local version of your library directly, so you don't have to deploy it to a repository every time you make a change.
+
+1. Create a `checkouts` directory in the root of your project.
+
+2. Inside the `checkouts` directory, create a symbolic link to the root of the `spy` project.
+
+#+BEGIN_SRC shell
+cd /path/to/your/project
+mkdir checkouts
+cd checkouts
+ln -s /path/to/spy spy
+#+END_SRC
+
+Now, when you run your project, Leiningen will use the code from the `spy` directory in your `checkouts` directory instead of the version from the repository. This means any changes you make to the `spy` library will be reflected immediately in your project.
+
+
+* Usage
+
+*Workflows*
+
+There are two main ways to use =spy=: dynamic instrumentation (the recommended approach) and manual wrapping.
+
+*** Dynamic Instrumentation (Quick and Easy)
+
+This is the most convenient way to use =spy= for quick debugging sessions. The Emacs command =clojure-spy-defn-at-point= (=C-c q=) uses =spy-runtime= to dynamically redefine the function at the point with spying instrumentation. You do not need to manually wrap your code with =(spy/spy ...)=.
+
+- *Important Quirk:* When you use this feature, the function in the REPL is a new, instrumented version. If you later re-evaluate the original =defn= form from your source file (e.g., by using your editor's "evaluate this form" command), the instrumentation will be lost because you are redefining the var with its original, un-instrumented code.
+
+*** Manual Wrapping (More Control)
+
+You can manually wrap any =defn=, =fn=, or =let= form with the =(spy/spy ...)= macro. This gives you more explicit control over what is being spied upon and when.
+
+- *Workflow:* The recommended way to use this is to wrap the form using =C-c w= (=clojure-spy-wrap-defn=), then evaluate the wrapped function to register the instrumentation. After you are done debugging, you can remove the wrapping with =C-c W= (=clojure-spy-unwrap-defn=) and re-evaluate the function.
+
+* Examples
+
+*Spying on a let block*
+
+#+BEGIN_SRC clojure
+(spy/spy
+  (let [x 10
+        y (* x 2)]
+    (println "x is" x "and y is" y)))
+
+(spy/spy-val 'x) ;=> 10
+(spy/spy-val 'y) ;=> 20
+#+END_SRC
+
+*Spying on a multi-arity function*
+
+#+BEGIN_SRC clojure
+(spy/spy
+  (defn my-fn
+    ([a] (my-fn a 10))
+    ([a b] (+ a b))))
+
+(my-fn 5)
+(spy/spy-val 'a) ;=> 5
+(spy/spy-val 'b) ;=> 10
+
+(my-fn 1 2)
+(spy/spy-val 'a) ;=> 1
+(spy/spy-val 'b) ;=> 2
+#+END_SRC
+
+*Spying on a function with destructuring*
+
+#+BEGIN_SRC clojure
+(spy/spy
+  (defn my-fn [{:keys [a b]}] 
+    (+ a b)))
+
+(my-fn {:a 1 :b 2})
+
+(spy/spy-val 'a) ;=> 1
+(spy/spy-val 'b) ;=> 2
+#+END_SRC
+
+*Emacs Workflow Example*
+
+1. With the cursor inside the following function, press =C-c q= to instrument it:
+
+#+BEGIN_SRC clojure
+(defn my-fn [a]
+  (let [b (* a 2)]
+    (+ a b)))
+#+END_SRC
+
+2. Now, evaluate a call to the function:
+
+#+BEGIN_SRC clojure
+(my-fn 10)
+#+END_SRC
+
+3. Move your cursor to the symbol =a= inside the =let= block and press =C-c o=. An overlay will appear showing the value =10=.
+
+4. Move your cursor to the symbol =b= and press =C-c o=. An overlay will appear showing the value =20=.
+
+5. Press =C-c O= to hide the overlays.
+
+6. Press =C-c y= to un-instrument the function.
+
+* Clojure Library (=spy.clj=)
+
+The core of the library is the =spy= macro and a set of functions to interact with the spied values.
+
+*** =spy= Macro
+
+The =spy= macro takes a body of code and rewrites it to record the values of local bindings. You can wrap any =let=, =fn=, or =defn= form.
+
+*** =spy-val=
+
+Retrieves the value of a spied symbol.
+
+*** =unspy=
+
+Resets all spy bindings.
+
+*** =spy-runtime=
+
+This function is the engine for quick, dynamic instrumentation. It takes a function's name and its source code, injects the spy logic, and redefines the function in its original namespace. This is what allows you to instrument a function without manually wrapping it in a =(spy/spy ...)= form.
+
+This is the function that powers the Emacs command =clojure-spy-defn-at-point= (=C-c q=).
+
+* Emacs Integration (=spy.el=)
+
+The =spy.el= file provides a powerful interface to the spy library from within Emacs. It defines a minor mode, =spy-clojure-mode=, which provides a set of keybindings for interacting with the spy library.
+
+*** Installation and Usage
+
+1. Load the =spy.el= file in your Emacs configuration. For example:
+
+#+BEGIN_SRC emacs-lisp
+(load-file "/path/to/spy.el")
+#+END_SRC
+
+2. The =spy-clojure-mode= is automatically enabled when you open a Clojure file. You will see the " Spy" indicator in your modeline.
+
+3. If you want to enable it manually, you can use the =M-x spy-clojure-mode-enable= command.
+
+*** Keybindings
+
+The following keybindings are available when `spy-clojure-mode` is active:
+
+| Keybinding | Command                       | Description                                           |
+|------------+-------------------------------+-------------------------------------------------------|
+| =C-c q=    | =clojure-spy-defn-at-point=   | Instrument the function at the point.                 |
+| =C-c y=    | =clojure-spy-unspy=           | Un-instrument the function at the point (or all with C-u). |
+| =C-c w=    | =clojure-spy-wrap-defn=       | Wrap the current function with =(spy/spy ...)=.       |
+| =C-c W=    | =clojure-spy-unwrap-defn=     | Unwrap the current function from =(spy/spy ...)=.     |
+| =C-c o=    | =clojure-spy-overlay-show=    | Show the value of the symbol at the point as an overlay. |
+| =C-c O=    | =clojure-spy-overlay-hide=    | Hide all spy overlays.                                |
+
+* TODO
+
+- *Improve storage of spied values:* Currently, all spied values are stored in a single global atom. This means if you spy on two different functions that have a local binding with the same name, the value will be overwritten. The storage should be namespaced, perhaps on a per-function basis.
+
+- *Clarify =spy-runtime= behavior:* The dynamic instrumentation is powerful, but it can be confusing that the instrumented function is a separate entity in the REPL. We need to make it clearer to the user that re-evaluating the original function will remove the instrumentation.
